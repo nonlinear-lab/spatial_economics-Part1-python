@@ -1,0 +1,69 @@
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+# ======================
+# 1. Configuration
+# ======================
+INPUT_FILE = r"C:\python\spatial\subsystem_indices_all_cities.csv" 
+FINAL_OUTPUT = "final_ccd_results.csv"
+
+def calculate_ccd(df, eps=1e-12):
+    """Calculates C (Coupling), T (Development), and D (Coordination)"""
+    U1 = df["U_transport"].astype(float).clip(lower=0.0)
+    U2 = df["U_population"].astype(float).clip(lower=0.0)
+    U3 = df["U_industry"].astype(float).clip(lower=0.0)
+    
+    # 1. Coupling Degree (C)
+    num = (U1 * U2 * U3).clip(lower=0.0)
+    den = (((U1 + U2 + U3) / 3.0).clip(lower=eps) ** 3)
+    C = np.power((num / den).clip(lower=0.0), 1.0 / 3.0).clip(0, 1)
+    
+    # 2. Comprehensive Development (T)
+    T = (U1 + U2 + U3) / 3.0
+    
+    # 3. Coupling Coordination Degree (D)
+    D = np.sqrt(C * T).clip(0, 1)
+    return C, T, D
+
+def classify(D):
+    """Categorizes the degree of coordination into 6 stages"""
+    bins = [-np.inf, 0.3, 0.4, 0.5, 0.6, 0.7, np.inf]
+    # Ensure all labels are inside this list and separated by commas
+    labels = [
+        "Extremely Low [0,0.3)",
+        "Low [0.3,0.4)",
+        "Medium-Low [0.4,0.5)",
+        "Medium [0.5,0.6)",
+        "Medium-High [0.6,0.7)",
+        "High [0.7,1]"
+    ]
+    # Uses right=False to match the second script's logic
+    return pd.cut(D, bins=bins, labels=labels, right=False, include_lowest=True)
+
+def main():
+    try:
+        if not Path(INPUT_FILE).exists():
+            print(f"Error: {INPUT_FILE} not found.")
+            return
+
+        df = pd.read_csv(INPUT_FILE)
+        
+        # Calculate and assign all metrics
+        # We assign C_coupling here specifically
+        df['C_coupling'], df['T_Development'], df['D_Coordination'] = calculate_ccd(df)
+        df['Coordination_Level'] = classify(df['D_Coordination'])
+        
+        # Save results to CSV
+        out_path = Path(INPUT_FILE).parent / FINAL_OUTPUT
+        df.to_csv(out_path, index=False, encoding="utf-8-sig")
+        
+        print(f"Success! Result saved to: {out_path}")
+        # Preview includes the new C_coupling column
+        print(df[['city_code', 'year', 'C_coupling', 'D_Coordination', 'Coordination_Level']].head(10))
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+if __name__ == "__main__":
+    main()

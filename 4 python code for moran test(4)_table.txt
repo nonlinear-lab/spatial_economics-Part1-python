@@ -1,0 +1,122 @@
+from __future__ import annotations
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+from IPython.display import display
+
+from libpysal.weights import Queen, KNN
+from libpysal.weights.util import full2W
+from esda import Moran, Moran_Local
+
+# =====================================================
+# 1. PATHS
+# =====================================================
+DATA_DIR = Path(r"C:/python/spatial")
+PANEL_PATH = DATA_DIR / "global_indices_for_moran.xlsx"
+SHAPEFILE_PATH = DATA_DIR / "cities18.shp"
+HSR_MATRIX_PATH = DATA_DIR / "W_time_2023.csv"
+
+GLOBAL_OUT = DATA_DIR / "moran_global_results.xlsx"
+LOCAL_OUT = DATA_DIR / "local_moran_results.xlsx"
+
+# =====================================================
+# 2. VARIABLES
+# =====================================================
+CITY_COL, YEAR_COL, Y_COL = "city_code", "year", "D_coordination"
+SHP_CITY_COL = "city_code"
+W_TYPES = ["QUEEN", "KNN", "IDW", "HSR"]
+K_NEIGHBORS, IDW_POWER, PERMUTATIONS = 4, 1, 999
+
+# =====================================================
+# 3. WEIGHT BUILDERS
+# =====================================================
+def build_queen(gdf):
+    w = Queen.from_dataframe(gdf, ids=gdf[SHP_CITY_COL].tolist())
+    w.transform = "R"
+    return w
+
+def build_knn(gdf, k):
+    w = KNN.from_dataframe(gdf, k=k, ids=gdf[SHP_CITY_COL].tolist())
+    w.transform = "R"
+    return w
+
+def build_idw(gdf, power=1):
+    if gdf.crs and gdf.crs.is_geographic:
+        gdf = gdf.to_crs(epsg=3857)
+    cent = gdf.geometry.centroid
+    coords = np.column_stack([cent.x.values, cent.y.values])
+    dmat = np.sqrt(((coords[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2))
+    np.fill_diagonal(dmat, np.nan)
+    wmat = np.where(np.isnan(1.0 / np.power(dmat, power)), 0, 1.0 / np.power(dmat, power))
+    w = full2W(wmat, ids=gdf[SHP_CITY_COL].tolist())
+    w.transform = "R"
+    return w
+
+def build_hsr(gdf, matrix_csv):
+    mat = pd.read_csv(matrix_csv, index_col=0)
+    mat.index = mat.index.astype(str)
+    mat.columns = mat.columns.astype(str)
+    ids = gdf[SHP_CITY_COL].astype(str).tolist()
+    mat = mat.reindex(index=ids, columns=ids).fillna(0)
+    wmat = np.where(mat.values > 0, 1.0 / mat.values, 0)
+    wmat = np.maximum(wmat, wmat.T)
+    np.fill_diagonal(wmat, 0)
+    w = full2W(wmat, ids=ids)
+    w.transform = "R"
+    return w
+
+# =====================================================
+# 4. EXECUTION
+# =====================-================================
+def main():
+    # Load Data
+    panel = pd.read_excel(PANEL_PATH)
+    panel[CITY_COL] = panel[CITY_COL].astype(str)
+    gdf = gpd.read_file(SHAPEFILE_PATH)
+    gdf[SHP_CITY_COL] = gdf[SHP_CITY_COL].astype(str)
+    gdf = gdf[gdf[SHP_CITY_COL].isin(panel[CITY_COL].unique())].sort_values(SHP_CITY_COL).reset_index(drop=True)
+
+    # Pre-build weights
+    weights = {
+        "QUEEN": build_queen(gdf),
+        "KNN": build_knn(gdf, K_NEIGHBORS),
+        "IDW": build_idw(gdf, IDW_POWER),
+        "HSR": build_hsr(gdf, HSR_MATRIX_PATH)
+    }
+
+    g_res, l_res = [], []
+
+    for yr in sorted(panel[YEAR_COL].unique()):
+        for wt, w in weights.items():
+            tmp = panel[panel[YEAR_COL] == yr].set_index(CITY_COL).reindex(w.id_order)
+            y = tmp[Y_COL].values.astype(float)
+            if np.isnan(y).any(): continue
+
+            # Global
+            mi = Moran(y, w, permutations=PERMUTATIONS)
+            g_res.append({"Year": yr, "Matrix": wt, "Moran_I": mi.I, "Z": mi.z_sim, "P": mi.p_sim})
+
+            # Local
+            lisa = Moran_Local(y, w, permutations=PERMUTATIONS)
+            q_map = {1: "HH", 2: "LH", 3: "LL", 4: "HL"}
+            types = [q_map.get(q, "Insignificant") if p < 0.05 else "Insignificant" for q, p in zip(lisa.q, lisa.p_sim)]
+            
+            ldf = pd.DataFrame({"city": w.id_order, "year": yr, "matrix": wt, "local_I": lisa.Is, "type": types})
+            l_res.append(ldf)
+
+    # Save and Display
+    df_g = pd.DataFrame(g_res)
+    df_l = pd.concat(l_res, ignore_index=True)
+    
+    df_g.to_excel(GLOBAL_OUT, index=False)
+    df_l.to_excel(LOCAL_OUT, index=False)
+
+    print("--- GLOBAL RESULTS PREVIEW ---")
+    display(df_g.head())
+    print("\n--- INDIVIDUAL CITY RESULTS (LISA) PREVIEW ---")
+    display(df_l.head(10))
+    print(f"\nFiles saved to {DATA_DIR}")
+
+if __name__ == "__main__":
+    main()

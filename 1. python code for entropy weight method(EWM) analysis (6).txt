@@ -1,0 +1,105 @@
+from __future__ import annotations
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+# ======================
+# Configuration
+# ======================
+DATA_PATH = r"C:\python\spatial\data1_spatial(1).xlsx"
+SHEET_NAME = 0  
+CITY_COL = "city_code"
+YEAR_COL = "year"
+
+# Indicators grouped by subsystem
+SUBSYSTEMS = {
+    "transport": ["T1", "T2"],
+    "population": ["Ln(P1)", "P2", "P3"],
+    "industry": ["I1", "I2"],
+}
+
+OUTPUT_FILENAME = "subsystem_indices_all_cities.csv"
+
+# ======================
+# Functions
+# ======================
+def minmax_norm(x: pd.Series) -> pd.Series:
+    """Normalizes indicators to a 0-1 scale based on the annual range[cite: 2, 9]."""
+    x = x.astype(float)
+    mn, mx = np.nanmin(x.values), np.nanmax(x.values)
+    if np.isclose(mx, mn):
+        return pd.Series(np.zeros(len(x)), index=x.index)
+    return (x - mn) / (mx - mn)
+
+def entropy_weights(Z: pd.DataFrame, eps: float = 1e-12) -> pd.Series:
+    """Calculates weights based on information entropy for each year[cite: 4]."""
+    n, m = Z.shape
+    if n <= 1:
+        return pd.Series(np.ones(m) / m, index=Z.columns)
+
+    col_sums = Z.sum(axis=0).replace(0.0, np.nan)
+    P = Z.div(col_sums, axis=1).fillna(0.0)
+
+    k = 1.0 / np.log(n)
+    P_safe = P.clip(lower=eps)
+    e = -k * (P * np.log(P_safe)).sum(axis=0)
+    
+    d = (1.0 - e).clip(lower=0.0)
+    if np.isclose(d.sum(), 0.0):
+        return pd.Series(np.ones(m) / m, index=Z.columns)
+    return d / d.sum()
+
+# ======================
+# Main Processing
+# ======================
+def main():
+    try:
+        # Load data [cite: 2]
+        df = pd.read_excel(DATA_PATH, sheet_name=SHEET_NAME)
+        df.columns = df.columns.astype(str).str.strip()
+        
+        if YEAR_COL not in df.columns:
+            print(f"Error: '{YEAR_COL}' not found.")
+            return
+
+        df[YEAR_COL] = df[YEAR_COL].astype(int)
+        yearly_results = []
+        
+        # Process every year and every city in that year [cite: 7]
+        for year, group in df.groupby(YEAR_COL):
+            g = group.copy()
+            
+            # 1. Impute missing values with yearly median [cite: 8]
+            all_cols = [c for cols in SUBSYSTEMS.values() for c in cols]
+            Z = pd.DataFrame(index=g.index)
+            for col in all_cols:
+                if col in g.columns:
+                    g[col] = g[col].fillna(g[col].median())
+                    # 2. Annual Normalization [cite: 9]
+                    Z[col] = minmax_norm(g[col])
+
+            # 3. Calculate subsystem indices (U) [cite: 1]
+            for sys_name, cols in SUBSYSTEMS.items():
+                existing_cols = [c for c in cols if c in Z.columns]
+                if existing_cols:
+                    w = entropy_weights(Z[existing_cols])
+                    g[f"U_{sys_name}"] = (Z[existing_cols] * w).sum(axis=1)
+
+            out_cols = [CITY_COL, YEAR_COL] + [f"U_{s}" for s in SUBSYSTEMS.keys() if f"U_{s}" in g.columns]
+            yearly_results.append(g[out_cols])
+
+        # Combine and Save
+        final_df = pd.concat(yearly_results, ignore_index=True)
+        out_path = Path(DATA_PATH).parent / OUTPUT_FILENAME
+        final_df.to_csv(out_path, index=False, encoding="utf-8-sig")
+        
+        print(f"Success! Processed {len(final_df)} rows (all years/cities).")
+        print(f"Results saved to: {out_path}")
+        # Use .to_string() to verify all 10 cities in the console if desired
+        print(final_df.head(10)) 
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+if __name__ == "__main__":
+    main()
